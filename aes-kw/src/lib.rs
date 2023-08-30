@@ -81,6 +81,9 @@ where
 {
     /// Initialized cipher
     cipher: Aes,
+
+    /// Default or overriden IV
+    iv: [u8; IV_LEN],
 }
 
 /// AES-128 KEK
@@ -150,7 +153,14 @@ where
     /// Constructs a new Kek based on the appropriate raw key material.
     pub fn new(key: &GenericArray<u8, Aes::KeySize>) -> Self {
         let cipher = Aes::new(key);
-        Kek { cipher }
+        let iv = IV;
+        Kek { cipher, iv }
+    }
+
+    /// Constructs a new Kek based on the appropriate raw key material and iv.
+    pub fn new_with_iv(key: &GenericArray<u8, Aes::KeySize>, iv: [u8; IV_LEN]) -> Self {
+        let cipher = Aes::new(key);
+        Kek { cipher, iv }
     }
 
     /// AES Key Wrap, as defined in RFC 3394.
@@ -177,7 +187,7 @@ where
 
         // Set A to the IV
         let block = &mut Block::<WCtx<'_>>::default();
-        block[..IV_LEN].copy_from_slice(&IV);
+        block[..IV_LEN].copy_from_slice(&self.iv);
 
         // 2) Calculate intermediate values
         out[IV_LEN..].copy_from_slice(data);
@@ -235,7 +245,7 @@ where
 
         // 3) Output the results
 
-        if block[..IV_LEN] == IV[..] {
+        if block[..IV_LEN] == self.iv[..] {
             Ok(())
         } else {
             Err(Error::IntegrityCheckFailed)
