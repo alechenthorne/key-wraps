@@ -13,6 +13,8 @@
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
+#[cfg(feature = "std")]
+use std::dbg;
 
 mod error;
 
@@ -81,9 +83,6 @@ where
 {
     /// Initialized cipher
     cipher: Aes,
-
-    /// Default or overriden IV
-    iv: [u8; IV_LEN],
 }
 
 /// AES-128 KEK
@@ -153,21 +152,14 @@ where
     /// Constructs a new Kek based on the appropriate raw key material.
     pub fn new(key: &GenericArray<u8, Aes::KeySize>) -> Self {
         let cipher = Aes::new(key);
-        let iv = IV;
-        Kek { cipher, iv }
-    }
-
-    /// Constructs a new Kek based on the appropriate raw key material and iv.
-    pub fn new_with_iv(key: &GenericArray<u8, Aes::KeySize>, iv: [u8; IV_LEN]) -> Self {
-        let cipher = Aes::new(key);
-        Kek { cipher, iv }
+        Kek { cipher }
     }
 
     /// AES Key Wrap, as defined in RFC 3394.
     ///
     /// The `out` buffer will be overwritten, and must be exactly [`IV_LEN`]
     /// bytes (i.e. 8 bytes) longer than the length of `data`.
-    pub fn wrap(&self, data: &[u8], out: &mut [u8]) -> Result<()> {
+    pub fn wrap_with_iv(&self, data: &[u8], out: &mut [u8], iv: [u8; IV_LEN]) -> Result<()> {
         if data.len() % SEMIBLOCK_SIZE != 0 {
             return Err(Error::InvalidDataSize);
         }
@@ -187,7 +179,7 @@ where
 
         // Set A to the IV
         let block = &mut Block::<WCtx<'_>>::default();
-        block[..IV_LEN].copy_from_slice(&self.iv);
+        block[..IV_LEN].copy_from_slice(&iv);
 
         // 2) Calculate intermediate values
         out[IV_LEN..].copy_from_slice(data);
@@ -198,6 +190,23 @@ where
         out[..IV_LEN].copy_from_slice(&block[..IV_LEN]);
 
         Ok(())
+    }
+
+    /// AES Key Wrap, as defined in RFC 3394.
+    ///
+    /// The `out` buffer will be overwritten, and must be exactly [`IV_LEN`]
+    /// bytes (i.e. 8 bytes) longer than the length of `data`.
+    pub fn wrap(&self, data: &[u8], out: &mut [u8]) -> Result<()> {
+        self.wrap_with_iv(data, out, IV)
+    }
+
+    /// Computes [`Self::wrap`], allocating a [`Vec`] for the return value.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    pub fn wrap_vec_with_iv(&self, data: &[u8], iv: [u8; IV_LEN]) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; data.len() + IV_LEN];
+        self.wrap_with_iv(data, &mut out, iv)?;
+        Ok(out)
     }
 
     /// Computes [`Self::wrap`], allocating a [`Vec`] for the return value.
@@ -213,7 +222,7 @@ where
     ///
     /// The `out` buffer will be overwritten, and must be exactly [`IV_LEN`]
     /// bytes (i.e. 8 bytes) shorter than the length of `data`.
-    pub fn unwrap(&self, data: &[u8], out: &mut [u8]) -> Result<()> {
+    pub fn unwrap_with_iv(&self, data: &[u8], out: &mut [u8], iv: [u8; IV_LEN]) -> Result<()> {
         if data.len() % SEMIBLOCK_SIZE != 0 {
             return Err(Error::InvalidDataSize);
         }
@@ -245,11 +254,33 @@ where
 
         // 3) Output the results
 
-        if block[..IV_LEN] == self.iv[..] {
+        if block[..IV_LEN] == iv[..] {
             Ok(())
         } else {
             Err(Error::IntegrityCheckFailed)
         }
+    }
+
+    /// AES Key Unwrap, as defined in RFC 3394.
+    ///
+    /// The `out` buffer will be overwritten, and must be exactly [`IV_LEN`]
+    /// bytes (i.e. 8 bytes) shorter than the length of `data`.
+    pub fn unwrap(&self, data: &[u8], out: &mut [u8]) -> Result<()> {
+        self.unwrap_with_iv(data, out, IV)
+    }
+
+    /// Computes [`Self::unwrap`], allocating a [`Vec`] for the return value.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    pub fn unwrap_vec_with_iv(&self, data: &[u8], iv: [u8; IV_LEN]) -> Result<Vec<u8>> {
+        let out_len = data
+            .len()
+            .checked_sub(IV_LEN)
+            .ok_or(Error::InvalidDataSize)?;
+
+        let mut out = vec![0u8; out_len];
+        self.unwrap_with_iv(data, &mut out, iv)?;
+        Ok(out)
     }
 
     /// Computes [`Self::unwrap`], allocating a [`Vec`] for the return value.
@@ -272,7 +303,12 @@ where
     /// The `out` buffer will be overwritten, and must be the smallest
     /// multiple of [`SEMIBLOCK_SIZE`] (i.e. 8) which is at least [`IV_LEN`]
     /// bytes (i.e. 8 bytes) longer than the length of `data`.
-    pub fn wrap_with_padding(&self, data: &[u8], out: &mut [u8]) -> Result<()> {
+    pub fn wrap_with_padding_with_iv(
+        &self,
+        data: &[u8],
+        out: &mut [u8],
+        iv: [u8; IV_LEN / 2],
+    ) -> Result<()> {
         if data.len() > KWP_MAX_LEN {
             return Err(Error::InvalidDataSize);
         }
@@ -297,7 +333,7 @@ where
 
         // Set A to the AIV
         let block = &mut Block::<WCtx<'_>>::default();
-        block[..IV_LEN / 2].copy_from_slice(&KWP_IV_PREFIX);
+        block[..IV_LEN / 2].copy_from_slice(&iv);
         block[IV_LEN / 2..IV_LEN].copy_from_slice(&mli);
 
         // If n is 1, the plaintext is encrypted as a single AES block
@@ -333,6 +369,30 @@ where
         Ok(())
     }
 
+    /// AES Key Wrap with Padding, as defined in RFC 5649.
+    ///
+    ///
+    /// The `out` buffer will be overwritten, and must be the smallest
+    /// multiple of [`SEMIBLOCK_SIZE`] (i.e. 8) which is at least [`IV_LEN`]
+    /// bytes (i.e. 8 bytes) longer than the length of `data`.
+    pub fn wrap_with_padding(&self, data: &[u8], out: &mut [u8]) -> Result<()> {
+        self.wrap_with_padding_with_iv(data, out, KWP_IV_PREFIX)
+    }
+
+    /// Computes [`Self::wrap`], allocating a [`Vec`] for the return value.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    pub fn wrap_with_padding_vec_with_iv(
+        &self,
+        data: &[u8],
+        iv: [u8; IV_LEN / 2],
+    ) -> Result<Vec<u8>> {
+        let n = (data.len() + SEMIBLOCK_SIZE - 1) / SEMIBLOCK_SIZE;
+        let mut out = vec![0u8; n * SEMIBLOCK_SIZE + IV_LEN];
+        self.wrap_with_padding_with_iv(data, &mut out, iv)?;
+        Ok(out)
+    }
+
     /// Computes [`Self::wrap`], allocating a [`Vec`] for the return value.
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
@@ -349,7 +409,12 @@ where
     /// bytes (i.e. 8 bytes) shorter than the length of `data`.
     /// This method returns a slice of `out`, truncated to the appropriate
     /// length by removing the padding.
-    pub fn unwrap_with_padding<'a>(&self, data: &[u8], out: &'a mut [u8]) -> Result<&'a [u8]> {
+    pub fn unwrap_with_padding_with_iv<'a>(
+        &self,
+        data: &[u8],
+        out: &'a mut [u8],
+        iv: [u8; IV_LEN / 2],
+    ) -> Result<&'a [u8]> {
         if data.len() % SEMIBLOCK_SIZE != 0 {
             return Err(Error::InvalidDataSize);
         }
@@ -394,7 +459,7 @@ where
 
         // Checks as defined in RFC5649 § 3
 
-        if block[..IV_LEN / 2] != KWP_IV_PREFIX {
+        if block[..IV_LEN / 2] != iv {
             return Err(Error::IntegrityCheckFailed);
         }
 
@@ -413,6 +478,34 @@ where
         Ok(&out[..mli])
     }
 
+    /// AES Key Wrap with Padding, as defined in RFC 5649.
+    ///
+    /// The `out` buffer will be overwritten, and must be exactly [`IV_LEN`]
+    /// bytes (i.e. 8 bytes) shorter than the length of `data`.
+    /// This method returns a slice of `out`, truncated to the appropriate
+    /// length by removing the padding.
+    pub fn unwrap_with_padding<'a>(&self, data: &[u8], out: &'a mut [u8]) -> Result<&'a [u8]> {
+        self.unwrap_with_padding_with_iv(data, out, KWP_IV_PREFIX)
+    }
+
+    /// Computes [`Self::unwrap`], allocating a [`Vec`] for the return value.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+    pub fn unwrap_with_padding_vec_with_iv(
+        &self,
+        data: &[u8],
+        iv: [u8; IV_LEN / 2],
+    ) -> Result<Vec<u8>> {
+        let out_len = data
+            .len()
+            .checked_sub(IV_LEN)
+            .ok_or(Error::InvalidDataSize)?;
+
+        let mut out = vec![0u8; out_len];
+        let out_len = self.unwrap_with_padding_with_iv(data, &mut out, iv)?.len();
+        out.truncate(out_len);
+        Ok(out)
+    }
     /// Computes [`Self::unwrap`], allocating a [`Vec`] for the return value.
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
